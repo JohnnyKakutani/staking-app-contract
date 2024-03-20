@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, MintTo, Transfer};
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
-
+use solana_program::sysvar::clock::Clock;
 declare_id!("7GZSUfS2MkyV1gCMbmWtP4K4QEJgFHdassxB1ZXZ2n9N");
 
 #[program]
@@ -34,9 +34,8 @@ pub mod stking_dapp {
             user_info.deposit_slot = 1;
         }
 
-        let clock = Clock::get()?;
-        let current_timestamp = clock.slot as u64;
-        let timestamp = current_timestamp.to_string();
+        let current_timestamp = Clock::get().unwrap().unix_timestamp as u64;
+
         if current_timestamp - user_info.deposit_slot < user_info.locked_days * 24 * 60 * 60
             || user_info.deposit_slot == 0
         {
@@ -69,12 +68,58 @@ pub mod stking_dapp {
         token::transfer(cpi_ctx, amount)?;
 
         user_info.amount += amount;
-        user_info.deposit_slot = clock.slot as u64;
+        user_info.deposit_slot = Clock::get().unwrap().unix_timestamp as u64;
         user_info.locked_days = lockedays;
         user_info.reward = user_info.amount * user_info.locked_days / 10;
         pool_info.amount += amount;
-        Ok(msg!(&timestamp))
+        Ok(msg!("Stake Success"))
     }
+
+    pub fn unstake(ctx: Context<Unstake>, amount: u64) -> Result<()> {
+        msg!("Instruction Unstake");
+
+        let user_info = &mut ctx.accounts.user_info;
+        let pool_info = &mut ctx.accounts.pool_info;
+
+        let current_timestamp = Clock::get().unwrap().unix_timestamp as u64;
+        
+        if current_timestamp - user_info.deposit_slot < user_info.locked_days * 24 * 60 * 60
+            || user_info.deposit_slot == 0
+        {
+            return err!(ErrCode::InvalidSchedule);
+        }
+
+        let reward = user_info.reward;
+
+        let cpi_accounts = MintTo {
+            mint: ctx.accounts.staking_token.to_account_info(),
+            to: ctx.accounts.user_staking_wallet.to_account_info(),
+            authority: ctx.accounts.admin.to_account_info(),
+        };
+
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        token::mint_to(cpi_ctx, reward)?;
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.admin_staking_wallet.to_account_info(),
+            to: ctx.accounts.user_staking_wallet.to_account_info(),
+            authority: ctx.accounts.admin.to_account_info(),
+        };
+
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+
+        token::transfer(cpi_ctx, amount)?;
+
+        user_info.amount -= amount;
+        pool_info.amount -= amount;
+        user_info.deposit_slot = 0;
+        user_info.locked_days = 0;
+        user_info.reward = 0;
+        Ok(msg!("Unstake Success"))
+    }
+
 }
 
 #[derive(Accounts)]
@@ -88,7 +133,6 @@ pub struct Initialize<'info> {
 
     #[account(mut)]
     pub staking_token: InterfaceAccount<'info, Mint>,
-
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -120,6 +164,31 @@ pub struct Stake<'info> {
     pub rent: Sysvar<'info, Rent>,
 }
 
+#[derive(Accounts)]
+pub struct Unstake<'info> {
+    #[account(mut, seeds=[b"pool", admin.key().as_ref()], bump )]
+    pub pool_info: Account<'info, PoolInfo>,
+
+    #[account(mut, seeds=[b"user", user.key().as_ref()], bump )]
+    pub user_info: Account<'info, UserInfo>,
+
+    #[account(mut)]
+    pub user: Signer<'info>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    #[account(mut)]
+    pub user_staking_wallet: InterfaceAccount<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub admin_staking_wallet: InterfaceAccount<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub staking_token: InterfaceAccount<'info, Mint>,
+    pub token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
+}
+
 #[account]
 pub struct UserInfo {
     pub is_initialized: bool,
@@ -143,4 +212,19 @@ impl UserInfo {
 
 impl PoolInfo {
     pub const LEN: usize = 1 + 32 + 32 + 8;
+}
+
+
+#[error_code]
+pub enum ErrCode {
+    #[msg("Invalid vesting schedule given.")]
+    InvalidSchedule,
+    #[msg("Invalid associated token address. Did you provide the correct address?")]
+    InvalidAssociatedTokenAddress,
+    #[msg("Insufficient fund")]
+    InvalidFund,
+    #[msg("Invalid unlock time")]
+    InvalidUnlockTime,
+    #[msg("Invalid unlock amount")]
+    InvalidUnlockAmount,
 }
